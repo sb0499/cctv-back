@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS ingresos_cctv (
     centro_comercial_id INT NOT NULL,
     fecha DATE NOT NULL,
     operador_cctv VARCHAR(255) NOT NULL,
+    orden_trabajo VARCHAR(255) NULL,
     visitante_nombre VARCHAR(255) NOT NULL,
     visitante_cedula VARCHAR(50) NOT NULL,
     hora_ingreso TIME NOT NULL,
@@ -41,9 +42,20 @@ CREATE TABLE IF NOT EXISTS usuarios (
     centro_comercial_id INT NOT NULL,
     username VARCHAR(50) NOT NULL UNIQUE,
     password VARCHAR(255) NOT NULL,
-    nombre_completo VARCHAR(255) NOT NULL
+    nombre_completo VARCHAR(255) NOT NULL,
+    rol ENUM('ADMIN', 'OPERADOR', 'SUPERVISOR') NOT NULL DEFAULT 'ADMIN'
 );
 
--- Usuario administrador por defecto (password: admin123)
--- Hash generado con bcrypt para 'admin123'
-INSERT IGNORE INTO usuarios (username, password, nombre_completo) VALUES ('admin', '$2a$10$6uG1S9Zf/p6L7S5K1z.Heu6v1fJv5X1v1v1v1v1v1v1v1v1v1v1', 'Administrador General');
+-- Centros Comerciales por defecto
+INSERT IGNORE INTO centros_comerciales (id, nombre, slug, color, logo) VALUES 
+(1, 'Scala Shopping', 'scala', '#932A53', 'scala.jpg'),
+(2, 'Condado Shopping', 'condado', '#654A94', 'condadoLogo.png'),
+(3, 'Pomasqui Plaza', 'pomasqui', '#3C4D78', 'pomasqui.jpg');
+
+-- Usuarios administradores por defecto (contraseñas encriptadas)
+INSERT IGNORE INTO usuarios (id, centro_comercial_id, username, password, nombre_completo, rol) VALUES 
+(1, 2, 'admin', '$2a$12$9mTdPRWvgPCYA/fIy66.G.PQHOfzlm/Opo.2S/Gr25EtvYwLWGtTS', 'Admin Condado', 'ADMIN'),
+(2, 1, 'admin_scala', '$2a$12$9mTdPRWvgPCYA/fIy66.G.PQHOfzlm/Opo.2S/Gr25EtvYwLWGtTS', 'Admin Scala', 'ADMIN'),
+(3, 2, 'admin_condado', '$2a$12$9mTdPRWvgPCYA/fIy66.G.PQHOfzlm/Opo.2S/Gr25EtvYwLWGtTS', 'Administrador Condado', 'ADMIN'),
+(4, 3, 'admin_pomasqui', '$2a$12$9mTdPRWvgPCYA/fIy66.G.PQHOfzlm/Opo.2S/Gr25EtvYwLWGtTS', 'Admin Pomasqui', 'ADMIN'),
+(5, 2, 'sbaquero', '$2a$12$9mTdPRWvgPCYA/fIy66.G.PQHOfzlm/Opo.2S/Gr25EtvYwLWGtTS', 'Sebastián Baquero', 'ADMIN');

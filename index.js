@@ -29,6 +29,16 @@ app.use('/pdfs', express.static(pdfDir));
 app.use('/signatures', express.static(sigDir));
 app.use('/logos', express.static(logoDir));
 
+// Middleware de autorización por roles
+function requireRole(allowedRoles) {
+  return (req, res, next) => {
+    if (!req.user || !allowedRoles.includes(req.user.rol)) {
+      return res.status(403).json({ message: 'Acceso denegado: permisos insuficientes' });
+    }
+    next();
+  };
+}
+
 // --- RUTAS PÚBLICAS ---
 
 // Obtener listado de Centros Comerciales
@@ -87,13 +97,15 @@ app.post('/api/admin/login', async (req, res) => {
       id: user.id, 
       username: user.username, 
       centro_comercial_id,
-      ccSlug
+      ccSlug,
+      rol: user.rol
     });
 
     res.json({ 
       token, 
       username: user.username, 
-      nombreCompleto: user.nombre_completo 
+      nombreCompleto: user.nombre_completo,
+      rol: user.rol
     });
   } catch (error) {
     console.error('Error en el login:', error);
@@ -265,7 +277,7 @@ app.get('/api/visitantes/:cedula', verifyToken, async (req, res) => {
 });
 
 // Obtener registros correspondientes a la sede del administrador autenticado
-app.get('/api/admin/ingresos', verifyToken, async (req, res) => {
+app.get('/api/admin/ingresos', verifyToken, requireRole(['ADMIN', 'SUPERVISOR']), async (req, res) => {
   const centro_comercial_id = req.user.centro_comercial_id;
   if (!centro_comercial_id) {
     return res.status(400).json({ message: 'Token sin información de sede' });
@@ -284,7 +296,7 @@ app.get('/api/admin/ingresos', verifyToken, async (req, res) => {
 });
 
 // Reporte PDF Consolidado de la sede autenticada
-app.get('/api/admin/reporte-pdf', verifyToken, async (req, res) => {
+app.get('/api/admin/reporte-pdf', verifyToken, requireRole(['ADMIN', 'SUPERVISOR']), async (req, res) => {
   const centro_comercial_id = req.user.centro_comercial_id;
   if (!centro_comercial_id) {
     return res.status(400).json({ message: 'Token sin información de sede' });
@@ -369,6 +381,233 @@ app.get('/api/admin/reporte-pdf', verifyToken, async (req, res) => {
   } catch (error) {
     console.error('PDF Error:', error);
     res.status(500).json({ message: 'Error al generar PDF' });
+  }
+});
+
+
+// --- NUEVOS ENDPOINTS DE GESTIÓN DE USUARIOS Y SEDES (SOLO ADMIN) ---
+
+// 1. Obtener listado de usuarios (Filtrado por sede del administrador)
+app.get('/api/admin/usuarios', verifyToken, requireRole(['ADMIN']), async (req, res) => {
+  const centro_comercial_id = req.user.centro_comercial_id;
+  try {
+    const results = await query(`
+      SELECT u.id, u.username, u.nombre_completo, u.centro_comercial_id, u.rol, cc.nombre AS centro_comercial_nombre 
+      FROM usuarios u 
+      LEFT JOIN centros_comerciales cc ON u.centro_comercial_id = cc.id 
+      WHERE u.centro_comercial_id = ?
+      ORDER BY u.nombre_completo ASC
+    `, [centro_comercial_id]);
+    res.json(results);
+  } catch (error) {
+    console.error('Error al obtener usuarios:', error);
+    res.status(500).json({ message: 'Error al obtener usuarios' });
+  }
+});
+
+// 2. Crear un usuario (Forzado a la sede del administrador)
+app.post('/api/admin/usuarios', verifyToken, requireRole(['ADMIN']), async (req, res) => {
+  const { username, password, nombre_completo, rol } = req.body;
+  const centro_comercial_id = req.user.centro_comercial_id;
+
+  if (!username || !password || !nombre_completo || !rol) {
+    return res.status(400).json({ message: 'Todos los campos son obligatorios' });
+  }
+
+  try {
+    // Validar si el username ya existe
+    const existing = await query('SELECT id FROM usuarios WHERE username = ?', [username]);
+    if (existing.length > 0) {
+      return res.status(400).json({ message: 'El nombre de usuario ya está registrado' });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    await query(
+      'INSERT INTO usuarios (username, password, nombre_completo, centro_comercial_id, rol) VALUES (?, ?, ?, ?, ?)',
+      [username, hashedPassword, nombre_completo, centro_comercial_id, rol]
+    );
+
+    res.status(201).json({ message: 'Usuario creado exitosamente' });
+  } catch (error) {
+    console.error('Error al crear usuario:', error);
+    res.status(500).json({ message: 'Error al crear usuario' });
+  }
+});
+
+// 3. Editar un usuario (Validación de pertenencia a sede del administrador)
+app.put('/api/admin/usuarios/:id', verifyToken, requireRole(['ADMIN']), async (req, res) => {
+  const { id } = req.params;
+  const { username, password, nombre_completo, rol } = req.body;
+  const centro_comercial_id = req.user.centro_comercial_id;
+
+  if (!username || !nombre_completo || !rol) {
+    return res.status(400).json({ message: 'Campos obligatorios faltantes' });
+  }
+
+  try {
+    // Verificar que el usuario a editar pertenezca a la misma sede del administrador
+    const targetUser = await query('SELECT centro_comercial_id FROM usuarios WHERE id = ?', [id]);
+    if (targetUser.length === 0) {
+      return res.status(404).json({ message: 'Usuario no encontrado' });
+    }
+    if (targetUser[0].centro_comercial_id !== centro_comercial_id) {
+      return res.status(403).json({ message: 'Acceso denegado: el usuario no pertenece a tu sede' });
+    }
+
+    // Validar si el username ya existe para otro usuario
+    const existing = await query('SELECT id FROM usuarios WHERE username = ? AND id != ?', [username, id]);
+    if (existing.length > 0) {
+      return res.status(400).json({ message: 'El nombre de usuario ya está en uso por otra cuenta' });
+    }
+
+    if (password && password.trim() !== '') {
+      const hashedPassword = await bcrypt.hash(password, 10);
+      await query(
+        'UPDATE usuarios SET username = ?, password = ?, nombre_completo = ?, centro_comercial_id = ?, rol = ? WHERE id = ?',
+        [username, hashedPassword, nombre_completo, centro_comercial_id, rol, id]
+      );
+    } else {
+      await query(
+        'UPDATE usuarios SET username = ?, nombre_completo = ?, centro_comercial_id = ?, rol = ? WHERE id = ?',
+        [username, nombre_completo, centro_comercial_id, rol, id]
+      );
+    }
+
+    res.json({ message: 'Usuario actualizado exitosamente' });
+  } catch (error) {
+    console.error('Error al actualizar usuario:', error);
+    res.status(500).json({ message: 'Error al actualizar usuario' });
+  }
+});
+
+// 4. Eliminar un usuario (Validación de pertenencia a sede del administrador)
+app.delete('/api/admin/usuarios/:id', verifyToken, requireRole(['ADMIN']), async (req, res) => {
+  const { id } = req.params;
+  const centro_comercial_id = req.user.centro_comercial_id;
+
+  // Evitar que el administrador se elimine a sí mismo
+  if (parseInt(id) === req.user.id) {
+    return res.status(400).json({ message: 'No puedes eliminar tu propio usuario de la sesión actual' });
+  }
+
+  try {
+    // Verificar que el usuario a eliminar pertenezca a la misma sede del administrador
+    const targetUser = await query('SELECT centro_comercial_id FROM usuarios WHERE id = ?', [id]);
+    if (targetUser.length === 0) {
+      return res.status(404).json({ message: 'Usuario no encontrado' });
+    }
+    if (targetUser[0].centro_comercial_id !== centro_comercial_id) {
+      return res.status(403).json({ message: 'Acceso denegado: el usuario no pertenece a tu sede' });
+    }
+
+    await query('DELETE FROM usuarios WHERE id = ?', [id]);
+    res.json({ message: 'Usuario eliminado exitosamente' });
+  } catch (error) {
+    console.error('Error al eliminar usuario:', error);
+    res.status(500).json({ message: 'Error al eliminar usuario' });
+  }
+});
+
+// 5. Crear una sede (Centro Comercial)
+app.post('/api/admin/centros-comerciales', verifyToken, requireRole(['ADMIN']), async (req, res) => {
+  const { nombre, slug, color, logoBase64 } = req.body;
+  if (!nombre || !slug) {
+    return res.status(400).json({ message: 'El nombre y slug son campos obligatorios' });
+  }
+
+  try {
+    // Validar nombre o slug existente
+    const existing = await query('SELECT id FROM centros_comerciales WHERE nombre = ? OR slug = ?', [nombre, slug]);
+    if (existing.length > 0) {
+      return res.status(400).json({ message: 'Ya existe una sede con ese nombre o slug' });
+    }
+
+    let logoName = null;
+    if (logoBase64 && logoBase64.startsWith('data:image')) {
+      const mimeType = logoBase64.substring(logoBase64.indexOf(":") + 1, logoBase64.indexOf(";"));
+      const extension = mimeType === 'image/png' ? 'png' : 'jpg';
+      logoName = `logo_${Date.now()}.${extension}`;
+      const logoPath = path.join(logoDir, logoName);
+      const base64Data = logoBase64.replace(/^data:image\/\w+;base64,/, "");
+      fs.writeFileSync(logoPath, base64Data, 'base64');
+    }
+
+    await query(
+      'INSERT INTO centros_comerciales (nombre, slug, color, logo) VALUES (?, ?, ?, ?)',
+      [nombre, slug, color || '#3b82f6', logoName]
+    );
+
+    res.status(201).json({ message: 'Sede creada exitosamente' });
+  } catch (error) {
+    console.error('Error al crear sede:', error);
+    res.status(500).json({ message: 'Error al crear sede' });
+  }
+});
+
+// 6. Editar una sede (Centro Comercial)
+app.put('/api/admin/centros-comerciales/:id', verifyToken, requireRole(['ADMIN']), async (req, res) => {
+  const { id } = req.params;
+  const { nombre, slug, color, logoBase64 } = req.body;
+  if (!nombre || !slug) {
+    return res.status(400).json({ message: 'El nombre y slug son campos obligatorios' });
+  }
+
+  try {
+    // Validar si nombre o slug están en uso por otra sede
+    const existing = await query('SELECT id FROM centros_comerciales WHERE (nombre = ? OR slug = ?) AND id != ?', [nombre, slug, id]);
+    if (existing.length > 0) {
+      return res.status(400).json({ message: 'Ya existe otra sede con ese nombre o slug' });
+    }
+
+    let logoName = null;
+    if (logoBase64 && logoBase64.startsWith('data:image')) {
+      const mimeType = logoBase64.substring(logoBase64.indexOf(":") + 1, logoBase64.indexOf(";"));
+      const extension = mimeType === 'image/png' ? 'png' : 'jpg';
+      logoName = `logo_${Date.now()}.${extension}`;
+      const logoPath = path.join(logoDir, logoName);
+      const base64Data = logoBase64.replace(/^data:image\/\w+;base64,/, "");
+      fs.writeFileSync(logoPath, base64Data, 'base64');
+    }
+
+    if (logoName) {
+      await query(
+        'UPDATE centros_comerciales SET nombre = ?, slug = ?, color = ?, logo = ? WHERE id = ?',
+        [nombre, slug, color || '#3b82f6', logoName, id]
+      );
+    } else {
+      await query(
+        'UPDATE centros_comerciales SET nombre = ?, slug = ?, color = ? WHERE id = ?',
+        [nombre, slug, color || '#3b82f6', id]
+      );
+    }
+
+    res.json({ message: 'Sede actualizada exitosamente' });
+  } catch (error) {
+    console.error('Error al actualizar sede:', error);
+    res.status(500).json({ message: 'Error al actualizar sede' });
+  }
+});
+
+// 7. Eliminar una sede (Centro Comercial)
+app.delete('/api/admin/centros-comerciales/:id', verifyToken, requireRole(['ADMIN']), async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    // Validar dependencias (usuarios y registros)
+    const usersCount = await query('SELECT COUNT(*) as count FROM usuarios WHERE centro_comercial_id = ?', [id]);
+    const recordsCount = await query('SELECT COUNT(*) as count FROM ingresos_cctv WHERE centro_comercial_id = ?', [id]);
+
+    if (usersCount[0].count > 0 || recordsCount[0].count > 0) {
+      return res.status(400).json({ 
+        message: 'No es posible eliminar la sede ya que existen usuarios o registros de ingreso asociados a ella.' 
+      });
+    }
+
+    await query('DELETE FROM centros_comerciales WHERE id = ?', [id]);
+    res.json({ message: 'Sede eliminada exitosamente' });
+  } catch (error) {
+    console.error('Error al eliminar sede:', error);
+    res.status(500).json({ message: 'Error al eliminar sede' });
   }
 });
 
