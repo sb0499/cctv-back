@@ -17,8 +17,9 @@ app.use(express.json({ limit: '50mb' }));
 
 const pdfDir = path.join(__dirname, 'public', 'pdfs');
 const sigDir = path.join(__dirname, 'public', 'signatures');
+const logoDir = path.join(__dirname, 'public', 'logos');
 
-[pdfDir, sigDir].forEach(dir => {
+[pdfDir, sigDir, logoDir].forEach(dir => {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
@@ -26,6 +27,7 @@ const sigDir = path.join(__dirname, 'public', 'signatures');
 
 app.use('/pdfs', express.static(pdfDir));
 app.use('/signatures', express.static(sigDir));
+app.use('/logos', express.static(logoDir));
 
 // --- RUTAS PÚBLICAS ---
 
@@ -88,7 +90,11 @@ app.post('/api/admin/login', async (req, res) => {
       ccSlug
     });
 
-    res.json({ token, username: user.username });
+    res.json({ 
+      token, 
+      username: user.username, 
+      nombreCompleto: user.nombre_completo 
+    });
   } catch (error) {
     console.error('Error en el login:', error);
     res.status(500).json({ message: 'Error interno del servidor' });
@@ -223,12 +229,38 @@ app.post('/api/ingresos', verifyToken, async (req, res) => {
       observaciones || null, pdfUrl, firmaUrl
     ];
 
+    // Guardar/Actualizar los datos de la persona en la tabla de visitantes
+    const upsertVisitorSql = `
+      INSERT INTO visitantes (cedula, nombre, tipo_funcionario, especificar_funcionario)
+      VALUES (?, ?, ?, ?)
+      ON DUPLICATE KEY UPDATE
+        nombre = VALUES(nombre),
+        tipo_funcionario = VALUES(tipo_funcionario),
+        especificar_funcionario = VALUES(especificar_funcionario)
+    `;
+    await query(upsertVisitorSql, [visitante_cedula, visitante_nombre, tipo_funcionario, especificar_funcionario || null]);
+
     await query(sql, params);
     res.status(200).json({ message: 'Registro exitoso', pdfUrl });
 
   } catch (error) {
     console.error('API Error:', error);
     res.status(500).json({ message: 'Error interno del servidor', error: error.message });
+  }
+});
+
+// Obtener datos del visitante por cédula
+app.get('/api/visitantes/:cedula', verifyToken, async (req, res) => {
+  const { cedula } = req.params;
+  try {
+    const results = await query('SELECT * FROM visitantes WHERE cedula = ?', [cedula]);
+    if (results.length === 0) {
+      return res.json({ found: false });
+    }
+    res.json({ found: true, visitante: results[0] });
+  } catch (error) {
+    console.error('Error al obtener visitante por cédula:', error);
+    res.status(500).json({ message: 'Error al obtener visitante' });
   }
 });
 
