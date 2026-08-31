@@ -645,7 +645,217 @@ app.get(
   },
 );
 
+// Reporte Excel Consolidado de la sede autenticada
+app.get(
+  "/api/admin/reporte-excel",
+  verifyToken,
+  requireRole(["ADMIN", "SUPERVISOR"]),
+  async (req, res) => {
+    const centro_comercial_id = req.user.centro_comercial_id;
+    if (!centro_comercial_id) {
+      return res.status(400).json({ message: "Token sin información de sede" });
+    }
+
+    try {
+      const cc = await query(
+        "SELECT nombre FROM centros_comerciales WHERE id = ?",
+        [centro_comercial_id],
+      );
+      const ccNombre = cc.length > 0 ? cc[0].nombre : "REGISTRO GENERAL";
+
+      // Build dynamic query with same optional filters as PDF export
+      const { fechaDesde, fechaHasta, estado } = req.query;
+      let sqlWhere = "WHERE centro_comercial_id = ?";
+      const sqlParams = [centro_comercial_id];
+
+      if (fechaDesde) {
+        sqlWhere += " AND DATE(fecha) >= ?";
+        sqlParams.push(fechaDesde);
+      }
+      if (fechaHasta) {
+        sqlWhere += " AND DATE(fecha) <= ?";
+        sqlParams.push(fechaHasta);
+      }
+      if (estado && (estado === "ABIERTO" || estado === "CERRADO")) {
+        sqlWhere += " AND estado = ?";
+        sqlParams.push(estado);
+      }
+
+      const results = await query(
+        `SELECT * FROM ingresos_cctv ${sqlWhere} ORDER BY fecha DESC, hora_ingreso DESC`,
+        sqlParams,
+      );
+
+      const ExcelJS = require("exceljs");
+      const workbook = new ExcelJS.Workbook();
+      workbook.creator = "Sistema CCTV";
+      workbook.created = new Date();
+
+      const sheet = workbook.addWorksheet("Registros", {
+        pageSetup: { orientation: "landscape", fitToPage: true },
+      });
+
+      // --- Build filter description for subtitle ---
+      const filterParts = [];
+      if (fechaDesde) filterParts.push(`Desde: ${fechaDesde}`);
+      if (fechaHasta) filterParts.push(`Hasta: ${fechaHasta}`);
+      if (estado) filterParts.push(`Estado: ${estado}`);
+      const filterDesc =
+        filterParts.length > 0
+          ? filterParts.join("   |   ")
+          : "Sin filtros aplicados — datos completos";
+
+      // --- Title rows ---
+      sheet.mergeCells("A1:M1");
+      const titleCell = sheet.getCell("A1");
+      titleCell.value = "REPORTE CONSOLIDADO DE REGISTRO DE TRABAJO CCTV";
+      titleCell.font = { bold: true, size: 14, color: { argb: "FFFFFFFF" } };
+      titleCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF0F172A" } };
+      titleCell.alignment = { horizontal: "center", vertical: "middle" };
+      sheet.getRow(1).height = 28;
+
+      sheet.mergeCells("A2:M2");
+      const subtitleCell = sheet.getCell("A2");
+      subtitleCell.value = ccNombre.toUpperCase();
+      subtitleCell.font = { bold: true, size: 11, color: { argb: "FF475569" } };
+      subtitleCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF8FAFC" } };
+      subtitleCell.alignment = { horizontal: "center", vertical: "middle" };
+      sheet.getRow(2).height = 20;
+
+      sheet.mergeCells("A3:M3");
+      const filterCell = sheet.getCell("A3");
+      filterCell.value = `Filtros aplicados: ${filterDesc}`;
+      filterCell.font = { italic: true, size: 9, color: { argb: "FF64748B" } };
+      filterCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF1F5F9" } };
+      filterCell.alignment = { horizontal: "center", vertical: "middle" };
+      sheet.getRow(3).height = 16;
+
+      sheet.addRow([]); // empty spacer row
+
+      // --- Column definitions ---
+      sheet.columns = [
+        { key: "fecha",         header: "FECHA",            width: 13 },
+        { key: "orden",         header: "ORDEN TRABAJO",    width: 15 },
+        { key: "operador",      header: "OPERADOR CCTV",    width: 22 },
+        { key: "visitante",     header: "VISITANTE",        width: 26 },
+        { key: "cedula",        header: "CÉDULA",           width: 15 },
+        { key: "tipo",          header: "TIPO FUNC.",       width: 14 },
+        { key: "especificar",   header: "EMP / EXT",        width: 18 },
+        { key: "estado",        header: "ESTADO",           width: 10 },
+        { key: "ingreso",       header: "HORA INGRESO",     width: 14 },
+        { key: "salida",        header: "HORA SALIDA",      width: 14 },
+        { key: "actividad",     header: "DETALLE ACTIVIDAD",width: 40 },
+        { key: "observaciones", header: "OBSERVACIONES",    width: 30 },
+        { key: "tiene_firma",   header: "FIRMA",            width: 10 },
+      ];
+
+      // Style header row (row 5 because of 3 title + 1 spacer)
+      const headerRow = sheet.getRow(5);
+      headerRow.eachCell((cell) => {
+        cell.font = { bold: true, size: 9, color: { argb: "FFFFFFFF" } };
+        cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF1E293B" } };
+        cell.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
+        cell.border = {
+          bottom: { style: "thin", color: { argb: "FF334155" } },
+        };
+      });
+      headerRow.height = 22;
+
+      // Freeze panes below header
+      sheet.views = [{ state: "frozen", xSplit: 0, ySplit: 5 }];
+
+      // --- Data rows ---
+      const ROW_LIGHT = "FFFFFFFF";
+      const ROW_ALT   = "FFF8FAFC";
+      const GREEN_BG  = "FFECFDF5";
+      const GREEN_FG  = "FF065F46";
+      const AMBER_BG  = "FFFEFCE8";
+      const AMBER_FG  = "FF92400E";
+
+      results.forEach((row, idx) => {
+        const fechaStr = row.fecha
+          ? new Date(row.fecha).toLocaleDateString("es-ES", { timeZone: "UTC" })
+          : "";
+
+        const dataRow = sheet.addRow({
+          fecha:         fechaStr,
+          orden:         row.orden_trabajo || "-",
+          operador:      row.operador_cctv,
+          visitante:     row.visitante_nombre,
+          cedula:        row.visitante_cedula,
+          tipo:          row.tipo_funcionario,
+          especificar:   row.especificar_funcionario || "-",
+          estado:        row.estado || "ABIERTO",
+          ingreso:       row.hora_ingreso,
+          salida:        row.hora_salida || "--:--",
+          actividad:     row.detalle_actividad_autorizacion,
+          observaciones: row.observaciones || "-",
+          tiene_firma:   row.firma_url ? "✓ Sí" : "✗ No",
+        });
+
+        const rowBg = idx % 2 === 0 ? ROW_LIGHT : ROW_ALT;
+
+        dataRow.eachCell({ includeEmpty: true }, (cell) => {
+          cell.font = { size: 9 };
+          cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: rowBg } };
+          cell.alignment = { vertical: "middle", wrapText: true };
+          cell.border = {
+            bottom: { style: "hair", color: { argb: "FFE2E8F0" } },
+          };
+        });
+
+        // Highlight ESTADO cell
+        const estadoCell = dataRow.getCell("estado");
+        if (row.estado === "CERRADO") {
+          estadoCell.font = { bold: true, size: 9, color: { argb: GREEN_FG } };
+          estadoCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: GREEN_BG } };
+        } else {
+          estadoCell.font = { bold: true, size: 9, color: { argb: AMBER_FG } };
+          estadoCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: AMBER_BG } };
+        }
+        estadoCell.alignment = { horizontal: "center", vertical: "middle" };
+
+        // Center time columns
+        dataRow.getCell("ingreso").alignment = { horizontal: "center", vertical: "middle" };
+        dataRow.getCell("salida").alignment  = { horizontal: "center", vertical: "middle" };
+        dataRow.getCell("tiene_firma").alignment = { horizontal: "center", vertical: "middle" };
+
+        dataRow.height = 18;
+      });
+
+      // --- Summary footer ---
+      sheet.addRow([]);
+      const totalRow = sheet.addRow([
+        `Total registros: ${results.length}`,
+        "", "", "", "", "", "", "", "", "", "", "",
+        `Generado: ${new Date().toLocaleString("es-ES")}`,
+      ]);
+      totalRow.getCell(1).font = { bold: true, italic: true, size: 9, color: { argb: "FF475569" } };
+      totalRow.getCell(13).font = { italic: true, size: 8, color: { argb: "FF94A3B8" } };
+
+      // --- Stream response ---
+      const safeName = ccNombre.replace(/\s+/g, "_").toLowerCase();
+      const dateStr = new Date().toISOString().split("T")[0];
+      res.setHeader(
+        "Content-Type",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      );
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename=reporte_${safeName}_${dateStr}.xlsx`,
+      );
+
+      await workbook.xlsx.write(res);
+      res.end();
+    } catch (error) {
+      console.error("Excel Error:", error);
+      res.status(500).json({ message: "Error al generar Excel" });
+    }
+  },
+);
+
 // --- NUEVOS ENDPOINTS DE GESTIÓN DE USUARIOS Y SEDES (SOLO ADMIN) ---
+
 
 // 1. Obtener listado de usuarios (Filtrado por sede del administrador)
 app.get(
