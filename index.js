@@ -732,36 +732,39 @@ app.get(
 
       sheet.addRow([]); // empty spacer row
 
-      // --- Column definitions ---
+      // --- Column definitions (NO header property — avoids ExcelJS overwriting row 1) ---
       sheet.columns = [
-        { key: "fecha",         header: "FECHA",            width: 13 },
-        { key: "orden",         header: "ORDEN TRABAJO",    width: 15 },
-        { key: "operador",      header: "OPERADOR CCTV",    width: 22 },
-        { key: "visitante",     header: "VISITANTE",        width: 26 },
-        { key: "cedula",        header: "CÉDULA",           width: 15 },
-        { key: "tipo",          header: "TIPO FUNC.",       width: 14 },
-        { key: "especificar",   header: "EMP / EXT",        width: 18 },
-        { key: "estado",        header: "ESTADO",           width: 10 },
-        { key: "ingreso",       header: "HORA INGRESO",     width: 14 },
-        { key: "salida",        header: "HORA SALIDA",      width: 14 },
-        { key: "actividad",     header: "DETALLE ACTIVIDAD",width: 40 },
-        { key: "observaciones", header: "OBSERVACIONES",    width: 30 },
-        { key: "tiene_firma",   header: "FIRMA",            width: 10 },
+        { key: "fecha",         width: 13 },
+        { key: "orden",         width: 15 },
+        { key: "operador",      width: 22 },
+        { key: "visitante",     width: 26 },
+        { key: "cedula",        width: 15 },
+        { key: "tipo",          width: 14 },
+        { key: "especificar",   width: 18 },
+        { key: "estado",        width: 10 },
+        { key: "ingreso",       width: 14 },
+        { key: "salida",        width: 14 },
+        { key: "actividad",     width: 40 },
+        { key: "observaciones", width: 30 },
+        { key: "tiene_firma",   width: 22 },
       ];
 
-      // Style header row (row 5 because of 3 title + 1 spacer)
-      const headerRow = sheet.getRow(5);
+      // --- Header row added manually (row 5: 3 title + 1 spacer + 1 header) ---
+      const HEADER_LABELS = [
+        "FECHA", "ORDEN TRABAJO", "OPERADOR CCTV", "VISITANTE", "CÉDULA",
+        "TIPO FUNC.", "EMP / EXT", "ESTADO", "HORA INGRESO", "HORA SALIDA",
+        "DETALLE ACTIVIDAD / AUTORIZACIÓN", "OBSERVACIONES", "CON FIRMA DIGITAL",
+      ];
+      const headerRow = sheet.addRow(HEADER_LABELS);
       headerRow.eachCell((cell) => {
         cell.font = { bold: true, size: 9, color: { argb: "FFFFFFFF" } };
         cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF1E293B" } };
         cell.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
-        cell.border = {
-          bottom: { style: "thin", color: { argb: "FF334155" } },
-        };
+        cell.border = { bottom: { style: "thin", color: { argb: "FF334155" } } };
       });
       headerRow.height = 22;
 
-      // Freeze panes below header
+      // Freeze panes below header (row 5)
       sheet.views = [{ state: "frozen", xSplit: 0, ySplit: 5 }];
 
       // --- Data rows ---
