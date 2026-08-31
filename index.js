@@ -486,9 +486,27 @@ app.get(
       );
       const ccNombre = cc.length > 0 ? cc[0].nombre : "REGISTRO GENERAL";
 
+      // Build dynamic query respecting optional filters from query params
+      const { fechaDesde, fechaHasta, estado } = req.query;
+      let sqlWhere = "WHERE centro_comercial_id = ?";
+      const sqlParams = [centro_comercial_id];
+
+      if (fechaDesde) {
+        sqlWhere += " AND DATE(fecha) >= ?";
+        sqlParams.push(fechaDesde);
+      }
+      if (fechaHasta) {
+        sqlWhere += " AND DATE(fecha) <= ?";
+        sqlParams.push(fechaHasta);
+      }
+      if (estado && (estado === "ABIERTO" || estado === "CERRADO")) {
+        sqlWhere += " AND estado = ?";
+        sqlParams.push(estado);
+      }
+
       const results = await query(
-        "SELECT * FROM ingresos_cctv WHERE centro_comercial_id = ? ORDER BY fecha DESC, hora_ingreso DESC",
-        [centro_comercial_id],
+        `SELECT * FROM ingresos_cctv ${sqlWhere} ORDER BY fecha DESC, hora_ingreso DESC`,
+        sqlParams,
       );
 
       const doc = new PDFDocument({ layout: "landscape", margin: 20 });
