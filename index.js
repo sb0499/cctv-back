@@ -1636,6 +1636,7 @@ app.post(
     }
 
     try {
+      const responsable_nombre = req.user.nombre_completo || req.user.username || "Operador";
       const total_camaras = camaras_inspeccion.length;
       const operativas = camaras_inspeccion.filter((c) => c.estado === 1 || c.estado === true).length;
       const no_operativas = total_camaras - operativas;
@@ -1648,7 +1649,7 @@ app.post(
         [
           usuario_id,
           centro_comercial_id,
-          req.user.nombre_completo || req.user.username,
+          responsable_nombre,
           total_camaras,
           operativas,
           no_operativas,
