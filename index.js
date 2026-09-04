@@ -18,8 +18,9 @@ app.use(express.json({ limit: "50mb" }));
 const pdfDir = path.join(__dirname, "public", "pdfs");
 const sigDir = path.join(__dirname, "public", "signatures");
 const logoDir = path.join(__dirname, "public", "logos");
+const cameraDir = path.join(__dirname, "public", "cameras");
 
-[pdfDir, sigDir, logoDir].forEach((dir) => {
+[pdfDir, sigDir, logoDir, cameraDir].forEach((dir) => {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
@@ -28,6 +29,28 @@ const logoDir = path.join(__dirname, "public", "logos");
 app.use("/pdfs", express.static(pdfDir));
 app.use("/signatures", express.static(sigDir));
 app.use("/logos", express.static(logoDir));
+app.use("/cameras", express.static(cameraDir));
+
+function saveCameraBase64Image(base64Str) {
+  if (!base64Str || typeof base64Str !== "string") return null;
+  if (!base64Str.startsWith("data:image/")) {
+    return base64Str;
+  }
+  try {
+    const matches = base64Str.match(/^data:image\/([a-zA-Z0-9]+);base64,(.+)$/);
+    if (!matches) return null;
+    const ext = matches[1] === "jpeg" ? "jpg" : matches[1];
+    const data = Buffer.from(matches[2], "base64");
+    const crypto = require("crypto");
+    const filename = `cam_${Date.now()}_${crypto.randomBytes(4).toString("hex")}.${ext}`;
+    const filePath = path.join(cameraDir, filename);
+    fs.writeFileSync(filePath, data);
+    return filename;
+  } catch (err) {
+    console.error("Error al guardar imagen de cámara:", err);
+    return null;
+  }
+}
 
 // Middleware de autorización por roles
 function requireRole(allowedRoles) {
@@ -1417,6 +1440,7 @@ app.post(
       modelo_id,
       estado,
       ip,
+      imagen,
       observaciones,
     } = req.body;
 
@@ -1425,10 +1449,12 @@ app.post(
     }
 
     try {
+      const savedImageFilename = saveCameraBase64Image(imagen);
+
       const sql = `
         INSERT INTO camaras 
-        (codigo_camara, nombre, propietario_id, nivel_id, sector_id, tipo_id, modelo_id, estado, ip, observaciones, empresa_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (codigo_camara, nombre, propietario_id, nivel_id, sector_id, tipo_id, modelo_id, estado, ip, imagen, observaciones, empresa_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `;
       const result = await query(sql, [
         codigo_camara || null,
@@ -1440,6 +1466,7 @@ app.post(
         modelo_id,
         estado ?? 1,
         ip || null,
+        savedImageFilename || null,
         observaciones || null,
         centro_comercial_id,
       ]);
@@ -1450,7 +1477,7 @@ app.post(
         [result.insertId, req.user.id, 1, estado ?? 1, "Cámara registrada en el sistema."]
       );
 
-      res.status(201).json({ message: "Cámara registrada exitosamente", id: result.insertId });
+      res.status(201).json({ message: "Cámara registrada exitosamente", id: result.insertId, imagen: savedImageFilename });
     } catch (error) {
       console.error("Error al registrar cámara:", error);
       res.status(500).json({ message: "Error al registrar cámara" });
@@ -1475,13 +1502,26 @@ app.put(
       modelo_id,
       estado,
       ip,
+      imagen,
       observaciones,
     } = req.body;
 
     try {
-      // Obtener estado anterior
-      const current = await query("SELECT estado FROM camaras WHERE id = ?", [id]);
+      // Obtener estado e imagen anterior
+      const current = await query("SELECT estado, imagen FROM camaras WHERE id = ?", [id]);
       const estadoAnterior = current.length > 0 ? current[0].estado : 1;
+      const imagenAnterior = current.length > 0 ? current[0].imagen : null;
+
+      let savedImageFilename = imagenAnterior;
+      if (imagen !== undefined) {
+        if (imagen === null || imagen === "") {
+          savedImageFilename = null;
+        } else if (imagen.startsWith("data:image/")) {
+          savedImageFilename = saveCameraBase64Image(imagen);
+        } else {
+          savedImageFilename = imagen;
+        }
+      }
 
       const sql = `
         UPDATE camaras SET
@@ -1494,6 +1534,7 @@ app.put(
           modelo_id = ?,
           estado = ?,
           ip = ?,
+          imagen = ?,
           observaciones = ?
         WHERE id = ?
       `;
@@ -1507,6 +1548,7 @@ app.put(
         modelo_id,
         estado ?? 1,
         ip || null,
+        savedImageFilename || null,
         observaciones || null,
         id,
       ]);
@@ -1517,7 +1559,7 @@ app.put(
         [id, req.user.id, estadoAnterior, estado ?? 1, observaciones || "Actualización de información de cámara."]
       );
 
-      res.json({ message: "Cámara actualizada exitosamente" });
+      res.json({ message: "Cámara actualizada exitosamente", imagen: savedImageFilename });
     } catch (error) {
       console.error("Error al actualizar cámara:", error);
       res.status(500).json({ message: "Error al actualizar cámara" });
@@ -1534,6 +1576,13 @@ app.delete(
     const { id } = req.params;
 
     try {
+      const current = await query("SELECT imagen FROM camaras WHERE id = ?", [id]);
+      if (current.length > 0 && current[0].imagen) {
+        const filePath = path.join(cameraDir, current[0].imagen);
+        if (fs.existsSync(filePath)) {
+          try { fs.unlinkSync(filePath); } catch (e) {}
+        }
+      }
       await query("DELETE FROM camaras WHERE id = ?", [id]);
       res.json({ message: "Cámara eliminada exitosamente" });
     } catch (error) {
