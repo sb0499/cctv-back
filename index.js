@@ -41,6 +41,16 @@ function requireRole(allowedRoles) {
   };
 }
 
+// Asegurar columnas enviar_email y email en la tabla usuarios si no existen
+(async () => {
+  try {
+    await query(`ALTER TABLE usuarios ADD COLUMN enviar_email TINYINT(1) DEFAULT 1`);
+  } catch (err) {}
+  try {
+    await query(`ALTER TABLE usuarios ADD COLUMN email VARCHAR(150) NULL`);
+  } catch (err) {}
+})();
+
 // --- RUTAS PÚBLICAS ---
 
 // Obtener listado de Centros Comerciales
@@ -868,16 +878,30 @@ app.get(
   async (req, res) => {
     const centro_comercial_id = req.user.centro_comercial_id;
     try {
-      const results = await query(
-        `
-      SELECT u.id, u.username, u.nombre_completo, u.centro_comercial_id, u.rol, cc.nombre AS centro_comercial_nombre 
-      FROM usuarios u 
-      LEFT JOIN centros_comerciales cc ON u.centro_comercial_id = cc.id 
-      WHERE u.centro_comercial_id = ?
-      ORDER BY u.nombre_completo ASC
-    `,
-        [centro_comercial_id],
-      );
+      let results;
+      try {
+        results = await query(
+          `
+        SELECT u.id, u.username, u.email, u.nombre_completo, u.centro_comercial_id, u.rol, IFNULL(u.enviar_email, 1) AS enviar_email, cc.nombre AS centro_comercial_nombre 
+        FROM usuarios u 
+        LEFT JOIN centros_comerciales cc ON u.centro_comercial_id = cc.id 
+        WHERE u.centro_comercial_id = ?
+        ORDER BY u.nombre_completo ASC
+      `,
+          [centro_comercial_id],
+        );
+      } catch (colErr) {
+        results = await query(
+          `
+        SELECT u.id, u.username, NULL AS email, u.nombre_completo, u.centro_comercial_id, u.rol, 1 AS enviar_email, cc.nombre AS centro_comercial_nombre 
+        FROM usuarios u 
+        LEFT JOIN centros_comerciales cc ON u.centro_comercial_id = cc.id 
+        WHERE u.centro_comercial_id = ?
+        ORDER BY u.nombre_completo ASC
+      `,
+          [centro_comercial_id],
+        );
+      }
       res.json(results);
     } catch (error) {
       console.error("Error al obtener usuarios:", error);
@@ -892,7 +916,7 @@ app.post(
   verifyToken,
   requireRole(["ADMIN"]),
   async (req, res) => {
-    const { username, password, nombre_completo, rol } = req.body;
+    const { username, email, password, nombre_completo, rol, enviar_email } = req.body;
     const centro_comercial_id = req.user.centro_comercial_id;
 
     if (!username || !password || !nombre_completo || !rol) {
@@ -913,10 +937,11 @@ app.post(
           .json({ message: "El nombre de usuario ya está registrado" });
       }
 
+      const enviarEmailVal = enviar_email === false || enviar_email === 0 || enviar_email === "0" ? 0 : 1;
       const hashedPassword = await bcrypt.hash(password, 10);
       await query(
-        "INSERT INTO usuarios (username, password, nombre_completo, centro_comercial_id, rol) VALUES (?, ?, ?, ?, ?)",
-        [username, hashedPassword, nombre_completo, centro_comercial_id, rol],
+        "INSERT INTO usuarios (username, email, password, nombre_completo, centro_comercial_id, rol, enviar_email) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [username, email || null, hashedPassword, nombre_completo, centro_comercial_id, rol, enviarEmailVal],
       );
 
       res.status(201).json({ message: "Usuario creado exitosamente" });
@@ -934,7 +959,7 @@ app.put(
   requireRole(["ADMIN"]),
   async (req, res) => {
     const { id } = req.params;
-    const { username, password, nombre_completo, rol } = req.body;
+    const { username, email, password, nombre_completo, rol, enviar_email } = req.body;
     const centro_comercial_id = req.user.centro_comercial_id;
 
     if (!username || !nombre_completo || !rol) {
@@ -971,23 +996,27 @@ app.put(
           });
       }
 
+      const enviarEmailVal = enviar_email === false || enviar_email === 0 || enviar_email === "0" ? 0 : 1;
+
       if (password && password.trim() !== "") {
         const hashedPassword = await bcrypt.hash(password, 10);
         await query(
-          "UPDATE usuarios SET username = ?, password = ?, nombre_completo = ?, centro_comercial_id = ?, rol = ? WHERE id = ?",
+          "UPDATE usuarios SET username = ?, email = ?, password = ?, nombre_completo = ?, centro_comercial_id = ?, rol = ?, enviar_email = ? WHERE id = ?",
           [
             username,
+            email || null,
             hashedPassword,
             nombre_completo,
             centro_comercial_id,
             rol,
+            enviarEmailVal,
             id,
           ],
         );
       } else {
         await query(
-          "UPDATE usuarios SET username = ?, nombre_completo = ?, centro_comercial_id = ?, rol = ? WHERE id = ?",
-          [username, nombre_completo, centro_comercial_id, rol, id],
+          "UPDATE usuarios SET username = ?, email = ?, nombre_completo = ?, centro_comercial_id = ?, rol = ?, enviar_email = ? WHERE id = ?",
+          [username, email || null, nombre_completo, centro_comercial_id, rol, enviarEmailVal, id],
         );
       }
 
@@ -1188,6 +1217,569 @@ app.delete(
   },
 );
 
+// ========================================================
+// ENDPOINTS DE CATÁLOGOS TÉCNICOS (SECAM)
+// ========================================================
+
+const TABLAS_CATALOGO_VALIDAS = ["modelos", "niveles", "propietarios", "sectores", "tipos"];
+
+// GET /api/catalogos/:tabla - Obtener catálogo por tipo y sede
+app.get(
+  "/api/catalogos/:tabla",
+  verifyToken,
+  requireRole(["ADMIN", "SUPERVISOR", "OPERADOR"]),
+  async (req, res) => {
+    const { tabla } = req.params;
+    const centro_comercial_id = req.user.centro_comercial_id;
+
+    if (!TABLAS_CATALOGO_VALIDAS.includes(tabla)) {
+      return res.status(400).json({ message: "Catálogo inválido" });
+    }
+
+    try {
+      const results = await query(
+        `SELECT * FROM ${tabla} WHERE empresa_id = ? AND activo = 1 ORDER BY nombre ASC`,
+        [centro_comercial_id]
+      );
+      res.json(results);
+    } catch (error) {
+      console.error(`Error al obtener catálogo ${tabla}:`, error);
+      res.status(500).json({ message: `Error al obtener catálogo ${tabla}` });
+    }
+  }
+);
+
+// POST /api/catalogos/:tabla - Crear ítem de catálogo
+app.post(
+  "/api/catalogos/:tabla",
+  verifyToken,
+  requireRole(["ADMIN", "SUPERVISOR"]),
+  async (req, res) => {
+    const { tabla } = req.params;
+    const { nombre } = req.body;
+    const centro_comercial_id = req.user.centro_comercial_id;
+
+    if (!TABLAS_CATALOGO_VALIDAS.includes(tabla)) {
+      return res.status(400).json({ message: "Catálogo inválido" });
+    }
+    if (!nombre || !nombre.trim()) {
+      return res.status(400).json({ message: "El nombre es obligatorio" });
+    }
+
+    try {
+      const result = await query(
+        `INSERT INTO ${tabla} (nombre, empresa_id, activo) VALUES (?, ?, 1)`,
+        [nombre.trim(), centro_comercial_id]
+      );
+      res.status(201).json({
+        id: result.insertId,
+        nombre: nombre.trim(),
+        empresa_id: centro_comercial_id,
+        activo: 1,
+      });
+    } catch (error) {
+      console.error(`Error al crear ítem en ${tabla}:`, error);
+      res.status(500).json({ message: "Error al crear ítem de catálogo" });
+    }
+  }
+);
+
+// PUT /api/catalogos/:tabla/:id - Editar ítem de catálogo
+app.put(
+  "/api/catalogos/:tabla/:id",
+  verifyToken,
+  requireRole(["ADMIN", "SUPERVISOR"]),
+  async (req, res) => {
+    const { tabla, id } = req.params;
+    const { nombre, activo } = req.body;
+
+    if (!TABLAS_CATALOGO_VALIDAS.includes(tabla)) {
+      return res.status(400).json({ message: "Catálogo inválido" });
+    }
+
+    try {
+      await query(
+        `UPDATE ${tabla} SET nombre = ?, activo = ? WHERE id = ?`,
+        [nombre, activo ?? 1, id]
+      );
+      res.json({ message: "Ítem de catálogo actualizado exitosamente" });
+    } catch (error) {
+      console.error(`Error al actualizar ítem en ${tabla}:`, error);
+      res.status(500).json({ message: "Error al actualizar ítem de catálogo" });
+    }
+  }
+);
+
+// DELETE /api/catalogos/:tabla/:id - Desactivar ítem de catálogo
+app.delete(
+  "/api/catalogos/:tabla/:id",
+  verifyToken,
+  requireRole(["ADMIN", "SUPERVISOR"]),
+  async (req, res) => {
+    const { tabla, id } = req.params;
+
+    if (!TABLAS_CATALOGO_VALIDAS.includes(tabla)) {
+      return res.status(400).json({ message: "Catálogo inválido" });
+    }
+
+    try {
+      await query(`UPDATE ${tabla} SET activo = 0 WHERE id = ?`, [id]);
+      res.json({ message: "Ítem de catálogo desactivado exitosamente" });
+    } catch (error) {
+      console.error(`Error al desactivar ítem en ${tabla}:`, error);
+      res.status(500).json({ message: "Error al desactivar ítem de catálogo" });
+    }
+  }
+);
+
+// ========================================================
+// ENDPOINTS DE CÁMARAS (SECAM)
+// ========================================================
+
+// GET /api/camaras - Listar cámaras de la sede autenticada
+app.get(
+  "/api/camaras",
+  verifyToken,
+  requireRole(["ADMIN", "SUPERVISOR", "OPERADOR"]),
+  async (req, res) => {
+    const centro_comercial_id = req.user.centro_comercial_id;
+
+    try {
+      const sql = `
+        SELECT c.*, 
+               p.nombre AS propietario_nombre,
+               n.nombre AS nivel_nombre,
+               s.nombre AS sector_nombre,
+               t.nombre AS tipo_nombre,
+               m.nombre AS modelo_nombre
+        FROM camaras c
+        LEFT JOIN propietarios p ON c.propietario_id = p.id
+        LEFT JOIN niveles n ON c.nivel_id = n.id
+        LEFT JOIN sectores s ON c.sector_id = s.id
+        LEFT JOIN tipos t ON c.tipo_id = t.id
+        LEFT JOIN modelos m ON c.modelo_id = m.id
+        WHERE c.empresa_id = ?
+        ORDER BY c.codigo_camara ASC, c.nombre ASC
+      `;
+      const results = await query(sql, [centro_comercial_id]);
+      res.json(results);
+    } catch (error) {
+      console.error("Error al obtener cámaras:", error);
+      res.status(500).json({ message: "Error al obtener lista de cámaras" });
+    }
+  }
+);
+
+// GET /api/camaras/historial - Obtener historial de cambios de cámaras
+app.get(
+  "/api/camaras/historial",
+  verifyToken,
+  requireRole(["ADMIN", "SUPERVISOR"]),
+  async (req, res) => {
+    const centro_comercial_id = req.user.centro_comercial_id;
+
+    try {
+      const sql = `
+        SELECT h.*, 
+               c.codigo_camara, 
+               c.nombre AS camara_nombre,
+               u.nombre_completo AS usuario_nombre
+        FROM historial_camaras h
+        JOIN camaras c ON h.camara_id = c.id
+        JOIN usuarios u ON h.usuario_id = u.id
+        WHERE c.empresa_id = ?
+        ORDER BY h.created_at DESC
+        LIMIT 200
+      `;
+      const results = await query(sql, [centro_comercial_id]);
+      res.json(results);
+    } catch (error) {
+      console.error("Error al obtener historial de cámaras:", error);
+      res.status(500).json({ message: "Error al obtener historial de cámaras" });
+    }
+  }
+);
+
+// POST /api/camaras - Registrar nueva cámara
+app.post(
+  "/api/camaras",
+  verifyToken,
+  requireRole(["ADMIN", "SUPERVISOR"]),
+  async (req, res) => {
+    const centro_comercial_id = req.user.centro_comercial_id;
+    const {
+      codigo_camara,
+      nombre,
+      propietario_id,
+      nivel_id,
+      sector_id,
+      tipo_id,
+      modelo_id,
+      estado,
+      ip,
+      observaciones,
+    } = req.body;
+
+    if (!nombre || !propietario_id || !nivel_id || !sector_id || !tipo_id || !modelo_id) {
+      return res.status(400).json({ message: "Faltan campos obligatorios para la cámara" });
+    }
+
+    try {
+      const sql = `
+        INSERT INTO camaras 
+        (codigo_camara, nombre, propietario_id, nivel_id, sector_id, tipo_id, modelo_id, estado, ip, observaciones, empresa_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `;
+      const result = await query(sql, [
+        codigo_camara || null,
+        nombre,
+        propietario_id,
+        nivel_id,
+        sector_id,
+        tipo_id,
+        modelo_id,
+        estado ?? 1,
+        ip || null,
+        observaciones || null,
+        centro_comercial_id,
+      ]);
+
+      // Registrar historial de creación
+      await query(
+        `INSERT INTO historial_camaras (camara_id, usuario_id, estado_anterior, estado_nuevo, observacion) VALUES (?, ?, ?, ?, ?)`,
+        [result.insertId, req.user.id, 1, estado ?? 1, "Cámara registrada en el sistema."]
+      );
+
+      res.status(201).json({ message: "Cámara registrada exitosamente", id: result.insertId });
+    } catch (error) {
+      console.error("Error al registrar cámara:", error);
+      res.status(500).json({ message: "Error al registrar cámara" });
+    }
+  }
+);
+
+// PUT /api/camaras/:id - Actualizar cámara
+app.put(
+  "/api/camaras/:id",
+  verifyToken,
+  requireRole(["ADMIN", "SUPERVISOR"]),
+  async (req, res) => {
+    const { id } = req.params;
+    const {
+      codigo_camara,
+      nombre,
+      propietario_id,
+      nivel_id,
+      sector_id,
+      tipo_id,
+      modelo_id,
+      estado,
+      ip,
+      observaciones,
+    } = req.body;
+
+    try {
+      // Obtener estado anterior
+      const current = await query("SELECT estado FROM camaras WHERE id = ?", [id]);
+      const estadoAnterior = current.length > 0 ? current[0].estado : 1;
+
+      const sql = `
+        UPDATE camaras SET
+          codigo_camara = ?,
+          nombre = ?,
+          propietario_id = ?,
+          nivel_id = ?,
+          sector_id = ?,
+          tipo_id = ?,
+          modelo_id = ?,
+          estado = ?,
+          ip = ?,
+          observaciones = ?
+        WHERE id = ?
+      `;
+      await query(sql, [
+        codigo_camara || null,
+        nombre,
+        propietario_id,
+        nivel_id,
+        sector_id,
+        tipo_id,
+        modelo_id,
+        estado ?? 1,
+        ip || null,
+        observaciones || null,
+        id,
+      ]);
+
+      // Registrar cambio en historial si varió el estado o las observaciones
+      await query(
+        `INSERT INTO historial_camaras (camara_id, usuario_id, estado_anterior, estado_nuevo, observacion) VALUES (?, ?, ?, ?, ?)`,
+        [id, req.user.id, estadoAnterior, estado ?? 1, observaciones || "Actualización de información de cámara."]
+      );
+
+      res.json({ message: "Cámara actualizada exitosamente" });
+    } catch (error) {
+      console.error("Error al actualizar cámara:", error);
+      res.status(500).json({ message: "Error al actualizar cámara" });
+    }
+  }
+);
+
+// DELETE /api/camaras/:id - Eliminar cámara
+app.delete(
+  "/api/camaras/:id",
+  verifyToken,
+  requireRole(["ADMIN", "SUPERVISOR"]),
+  async (req, res) => {
+    const { id } = req.params;
+
+    try {
+      await query("DELETE FROM camaras WHERE id = ?", [id]);
+      res.json({ message: "Cámara eliminada exitosamente" });
+    } catch (error) {
+      console.error("Error al eliminar cámara:", error);
+      res.status(500).json({ message: "Error al eliminar cámara" });
+    }
+  }
+);
+
+// ========================================================
+// ENDPOINTS DE REPORTES DE INSPECCIÓN (SECAM)
+// ========================================================
+
+// GET /api/reportes-inspeccion - Listar reportes de inspección de la sede
+app.get(
+  "/api/reportes-inspeccion",
+  verifyToken,
+  requireRole(["ADMIN", "SUPERVISOR", "OPERADOR"]),
+  async (req, res) => {
+    const centro_comercial_id = req.user.centro_comercial_id;
+
+    try {
+      const sql = `
+        SELECT r.*, u.nombre_completo AS responsable_usuario
+        FROM reportes r
+        LEFT JOIN usuarios u ON r.usuario_id = u.id
+        WHERE r.empresa_id = ?
+        ORDER BY r.created_at DESC
+      `;
+      const results = await query(sql, [centro_comercial_id]);
+      res.json(results);
+    } catch (error) {
+      console.error("Error al obtener reportes de inspección:", error);
+      res.status(500).json({ message: "Error al obtener reportes de inspección" });
+    }
+  }
+);
+
+// POST /api/reportes-inspeccion - Registrar inspección de chequeo diaria de cámaras
+app.post(
+  "/api/reportes-inspeccion",
+  verifyToken,
+  requireRole(["ADMIN", "SUPERVISOR", "OPERADOR"]),
+  async (req, res) => {
+    const centro_comercial_id = req.user.centro_comercial_id;
+    const usuario_id = req.user.id;
+    const { observaciones, camaras_inspeccion } = req.body;
+
+    if (!Array.isArray(camaras_inspeccion) || camaras_inspeccion.length === 0) {
+      return res.status(400).json({ message: "Debe incluir el detalle de la inspección de cámaras" });
+    }
+
+    try {
+      const total_camaras = camaras_inspeccion.length;
+      const operativas = camaras_inspeccion.filter((c) => c.estado === 1 || c.estado === true).length;
+      const no_operativas = total_camaras - operativas;
+      const pdf_filename = `reporte_inspeccion_${Date.now()}.pdf`;
+
+      // 1. Insertar encabezado de reporte
+      const repResult = await query(
+        `INSERT INTO reportes (usuario_id, empresa_id, responsable_nombre, total_camaras, operativas, no_operativas, pdf_path)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [
+          usuario_id,
+          centro_comercial_id,
+          req.user.nombre_completo || req.user.username,
+          total_camaras,
+          operativas,
+          no_operativas,
+          pdf_filename,
+        ]
+      );
+      const reporte_id = repResult.insertId;
+
+      // 2. Insertar detalles e inspeccionar estado de cámaras
+      for (const cam of camaras_inspeccion) {
+        const estadoVal = cam.estado ? 1 : 0;
+
+        await query(
+          `INSERT INTO reporte_detalle 
+           (reporte_id, camara_id, codigo_camara, nombre_camara, propietario_nombre, sector_nombre, nivel_nombre, tipo_nombre, modelo_nombre, estado, observacion)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            reporte_id,
+            cam.id,
+            cam.codigo_camara || "",
+            cam.nombre || "",
+            cam.propietario_nombre || "",
+            cam.sector_nombre || "",
+            cam.nivel_nombre || "",
+            cam.tipo_nombre || "",
+            cam.modelo_nombre || "",
+            estadoVal,
+            cam.observaciones || null,
+          ]
+        );
+
+        // Actualizar estado actual de la cámara
+        await query(`UPDATE camaras SET estado = ?, observaciones = ? WHERE id = ?`, [
+          estadoVal,
+          cam.observaciones || null,
+          cam.id,
+        ]);
+
+        // Registrar en historial_camaras
+        await query(
+          `INSERT INTO historial_camaras (camara_id, usuario_id, estado_anterior, estado_nuevo, observacion) VALUES (?, ?, ?, ?, ?)`,
+          [cam.id, usuario_id, cam.estado_anterior ?? estadoVal, estadoVal, cam.observaciones || "Inspección de rutina."]
+        );
+      }
+
+      // Generar PDF corporativo y enviar notificación por correo electrónico
+      try {
+        const { generateReportPDF } = require("./utils/pdfReport");
+        const { sendReportEmail } = require("./utils/emailService");
+
+        const ccData = await query(`SELECT nombre, slug FROM centros_comerciales WHERE id = ?`, [centro_comercial_id]);
+        const sedeNombre = ccData[0]?.nombre || 'Centro Comercial';
+        const sedeSlug = ccData[0]?.slug || 'sede';
+
+        const pdfFilename = `reporte_inspeccion_${reporte_id}_${Date.now()}.pdf`;
+        const pdfPath = path.join(pdfDir, pdfFilename);
+
+        const detalles = await query(`SELECT * FROM reporte_detalle WHERE reporte_id = ? ORDER BY propietario_nombre ASC, nombre_camara ASC`, [reporte_id]);
+        const reporteObj = { id: reporte_id, responsable_nombre, fecha: new Date(), total_camaras, operativas, no_operativas };
+
+        await generateReportPDF(reporteObj, detalles, sedeNombre, sedeSlug, pdfPath);
+        await query(`UPDATE reportes SET pdf_path = ? WHERE id = ?`, [pdfFilename, reporte_id]);
+
+        // Buscar usuarios destinatarios con email válido y suscritos a notificaciones (enviar_email = 1)
+        const usuariosCorreo = await query(
+          `SELECT COALESCE(NULLIF(email, ''), username) AS correo FROM usuarios WHERE centro_comercial_id = ? AND (enviar_email = 1 OR enviar_email IS NULL) AND (email LIKE '%@%' OR username LIKE '%@%')`,
+          [centro_comercial_id]
+        );
+        const emailList = usuariosCorreo.map((u) => u.correo).filter(Boolean);
+
+        // Disparar envío de correo en segundo plano
+        sendReportEmail(emailList, reporteObj, sedeNombre, pdfPath).catch((err) => {
+          console.error("Fallo asíncrono al enviar correo:", err);
+        });
+      } catch (pdfErr) {
+        console.error("Error al generar PDF o procesar correos:", pdfErr);
+      }
+
+      res.status(201).json({
+        message: "Inspección de cámaras registrada exitosamente",
+        reporte_id,
+        total_camaras,
+        operativas,
+        no_operativas,
+      });
+    } catch (error) {
+      console.error("Error al registrar reporte de inspección:", error);
+      res.status(500).json({ message: "Error al registrar reporte de inspección" });
+    }
+  }
+);
+
+// GET /api/reportes-inspeccion/:id/excel - Descargar reporte de inspección en Excel (.xlsx) 100% idéntico a SECAM
+app.get(
+  "/api/reportes-inspeccion/:id/excel",
+  verifyToken,
+  requireRole(["ADMIN", "SUPERVISOR", "OPERADOR"]),
+  async (req, res) => {
+    const { id } = req.params;
+    const centro_comercial_id = req.user.centro_comercial_id;
+
+    try {
+      const { generateReportExcel } = require("./utils/excelReport");
+      const rep = await query(
+        `SELECT r.*, c.nombre AS sede_nombre, c.slug AS sede_slug
+         FROM reportes r
+         LEFT JOIN centros_comerciales c ON r.empresa_id = c.id
+         WHERE r.id = ? AND r.empresa_id = ?`,
+        [id, centro_comercial_id]
+      );
+
+      if (rep.length === 0) {
+        return res.status(404).json({ message: "Reporte de inspección no encontrado" });
+      }
+
+      const reporte = rep[0];
+      const detalles = await query(
+        `SELECT * FROM reporte_detalle WHERE reporte_id = ? ORDER BY propietario_nombre ASC, nombre_camara ASC`,
+        [id]
+      );
+
+      const buffer = await generateReportExcel(reporte, detalles, reporte.sede_nombre, reporte.sede_slug);
+
+      res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+      res.setHeader("Content-Disposition", `attachment; filename=reporte_${id}_${Date.now()}.xlsx`);
+      res.send(buffer);
+    } catch (error) {
+      console.error("Error al exportar Excel de inspección:", error);
+      res.status(500).json({ message: "Error al exportar reporte Excel" });
+    }
+  }
+);
+
+// GET /api/reportes-inspeccion/:id/pdf - Generar y descargar reporte de inspección en PDF
+app.get(
+  "/api/reportes-inspeccion/:id/pdf",
+  verifyToken,
+  requireRole(["ADMIN", "SUPERVISOR", "OPERADOR"]),
+  async (req, res) => {
+    const { id } = req.params;
+    const centro_comercial_id = req.user.centro_comercial_id;
+
+    try {
+      const { generateReportPDF } = require("./utils/pdfReport");
+      const rep = await query(
+        `SELECT r.*, c.nombre AS sede_nombre, c.slug AS sede_slug
+         FROM reportes r
+         LEFT JOIN centros_comerciales c ON r.empresa_id = c.id
+         WHERE r.id = ? AND r.empresa_id = ?`,
+        [id, centro_comercial_id]
+      );
+
+      if (rep.length === 0) {
+        return res.status(404).json({ message: "Reporte de inspección no encontrado" });
+      }
+
+      const reporte = rep[0];
+      const detalles = await query(
+        `SELECT * FROM reporte_detalle WHERE reporte_id = ? ORDER BY propietario_nombre ASC, nombre_camara ASC`,
+        [id]
+      );
+
+      const filename = `reporte_inspeccion_${id}_${Date.now()}.pdf`;
+      const pdfPath = path.join(pdfDir, filename);
+
+      await generateReportPDF(reporte, detalles, reporte.sede_nombre, reporte.sede_slug, pdfPath);
+
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader("Content-Disposition", `inline; filename=${filename}`);
+      res.sendFile(pdfPath);
+    } catch (error) {
+      console.error("Error al generar PDF de inspección:", error);
+      res.status(500).json({ message: "Error al generar PDF de inspección" });
+    }
+  }
+);
+
 app.listen(PORT, () => {
   console.log(`Servidor backend corriendo en http://localhost:${PORT}`);
 });
+
+
+
